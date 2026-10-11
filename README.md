@@ -1,4 +1,4 @@
-GitHub Backup Vault
+## GitHub Backup Vault
 
 [日本語](README.ja.md)
 
