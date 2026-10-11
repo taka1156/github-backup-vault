@@ -1,0 +1,139 @@
+name: Backup repositories
+
+on:
+  schedule:
+    - cron: "0 18 1,15 * *" # The 1st and 15th of every month at 18:00 UTC (03:00 on the 2nd and 16th in JST)
+  workflow_dispatch:
+    inputs:
+      destination:
+        description: "アップロード先"
+        type: choice
+        default: r2
+        options: [both, r2, gdrive]
+
+env:
+  REPO_LIST_FILE: repos.txt # One line per repository (owner/repo). # Everything after this is a comment.
+  RETENTION_DAYS: "30" # Number of days to retain at the destination (0 means do not delete)
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mirror clone & zip
+        env:
+          # PATs (fine-grained / classic) with “Contents: Read” permissions for all target repositories
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN }}
+        run: |
+          set -uo pipefail
+          STAMP="$(date -u +%Y%m%d-%H%M%S)"
+          WORK="$RUNNER_TEMP/backup"
+          mkdir -p "$WORK/repos"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+
+          AUTH="$(printf 'x-access-token:%s' "$GH_BACKUP_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+
+          MANIFEST="$RUNNER_TEMP/github-backup-${STAMP}-manifest.csv"
+          echo "repo,status,size_bytes,size_human,branches,tags,commits,last_commit" > "$MANIFEST"
+          echo "MANIFEST=$MANIFEST" >> "$GITHUB_ENV"
+
+          failed=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            repo="$(echo "${line%%#*}" | tr -d '[:space:]\r')"
+            [ -z "$repo" ] && continue
+            # Normalize to owner/repo even if written in URL format
+            repo="${repo#https://github.com/}"; repo="${repo%.git}"
+            dir="$WORK/repos/${repo//\//__}.git"
+            echo "::group::$repo"
+            # Pass the token via an extra header; do not store it in .git/config
+            if git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
+                 clone --mirror "https://github.com/${repo}.git" "$dir"; then
+              echo "OK: $repo"
+              bytes="$(du -sb "$dir" | cut -f1)"
+              human="$(numfmt --to=iec --suffix=B "$bytes")"
+              branches="$(git -C "$dir" for-each-ref refs/heads | wc -l)"
+              tags="$(git -C "$dir" for-each-ref refs/tags | wc -l)"
+              commits="$(git -C "$dir" rev-list --all --count 2>/dev/null || echo 0)"
+              last="$(git -C "$dir" log --all -1 --format=%cI 2>/dev/null || true)"
+              echo "$repo,ok,$bytes,$human,$branches,$tags,$commits,$last" >> "$MANIFEST"
+            else
+              echo "::error::clone failed: $repo"
+              echo "$repo,FAILED,,,,,," >> "$MANIFEST"
+              failed+=("$repo")
+            fi
+            echo "::endgroup::"
+          done < "$REPO_LIST_FILE"
+
+          ARCHIVE="$RUNNER_TEMP/github-backup-${STAMP}.zip"
+          (cd "$WORK/repos" && zip -qr -9 "$ARCHIVE" .)
+          ls -lh "$ARCHIVE"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+          # --- Size and Other Information Dump (Log + Job Summary + Manifest CSV) ---
+          ZIP_BYTES="$(stat -c %s "$ARCHIVE")"
+          {
+            echo "## Backup report ($STAMP UTC)"
+            echo
+            echo "- Archive: \`$(basename "$ARCHIVE")\` — **$(numfmt --to=iec --suffix=B "$ZIP_BYTES")** ($ZIP_BYTES bytes)"
+            echo "- Repositories: $(tail -n +2 "$MANIFEST" | wc -l) (failed: ${#failed[@]})"
+            echo
+            echo "| repo | status | size | branches | tags | commits | last commit |"
+            echo "|---|---|---:|---:|---:|---:|---|"
+            tail -n +2 "$MANIFEST" | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$4,$5,$6,$7,$8}'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "ZIP_BYTES=$ZIP_BYTES" >> "$GITHUB_ENV"
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "FAILED_REPOS=${failed[*]}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Upload to Cloudflare R2
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.destination != 'gdrive' }}
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copyto "$ARCHIVE" "R2:${R2_BUCKET}/github-backup/$(basename "$ARCHIVE")" -v
+          rclone copyto "$MANIFEST" "R2:${R2_BUCKET}/github-backup/$(basename "$MANIFEST")" -v
+          if [ "$RETENTION_DAYS" != "0" ]; then
+            rclone delete "R2:${R2_BUCKET}/github-backup" --min-age "${RETENTION_DAYS}d" -v
+          fi
+
+      - name: Upload to Google Drive
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.destination != 'r2' }}
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          # Folder ID within the shared drive (or drive ID if the folder is directly under the shared drive)
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          RCLONE_CONFIG_GDRIVE_TEAM_DRIVE: ${{ secrets.GDRIVE_SHARED_DRIVE_ID }}
+        run: |
+          rclone copyto "$ARCHIVE" "GDRIVE:$(basename "$ARCHIVE")" -v
+          rclone copyto "$MANIFEST" "GDRIVE:$(basename "$MANIFEST")" -v
+          if [ "$RETENTION_DAYS" != "0" ]; then
+            rclone delete "GDRIVE:" --min-age "${RETENTION_DAYS}d" --include "github-backup-*" -v
+          fi
+
+      - name: Fail if some repositories could not be backed up
+        if: ${{ always() && env.FAILED_REPOS != '' }}
+        run: |
+          echo "::error::Repositories with Failed Backups: $FAILED_REPOS"
+          exit 1

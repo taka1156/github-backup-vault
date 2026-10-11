@@ -1,0 +1,33 @@
+# other
+taka1156/taka1156
+taka1156/cms
+taka1156/zenn-rss-notifier
+taka1156/notion-rss-reader
+
+# js/ts
+taka1156/nuxt-portfolio
+taka1156/webspaces
+taka1156/ogp-card
+taka1156/rss-decks-extension
+taka1156/desktop-layout-planner
+taka1156/docspaces
+taka1156/tool
+taka1156/teapot
+taka1156/doc2epub
+taka1156/zenn-writing-environment
+taka1156/fake-site-guard-extension
+
+# go
+taka1156/brite
+taka1156/brite-template
+taka1156/codespacegen
+taka1156/codespace-template
+
+# infra
+taka1156/bastion-ssh
+taka1156/ansible-practice
+taka1156/portainer-stack
+taka1156/furnace
+taka1156/furnace-open
+taka1156/codespaces-autosnapshot
+taka1156/github-backup-vault
