@@ -3,6 +3,7 @@ taka1156/taka1156
 taka1156/cms
 taka1156/zenn-rss-notifier
 taka1156/notion-rss-reader
+taka1156/memo
 
 # js/ts
 taka1156/nuxt-portfolio
@@ -22,6 +23,9 @@ taka1156/brite
 taka1156/brite-template
 taka1156/codespacegen
 taka1156/codespace-template
+
+# python
+taka1156/memo-kit
 
 # infra
 taka1156/bastion-ssh
